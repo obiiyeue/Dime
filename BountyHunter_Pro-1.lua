@@ -60,6 +60,8 @@ local S = {
     HopBusy         = false,
     -- Trạng thái: "hunting" | "waiting" | "hopping"
     Status          = "hunting",
+    -- Flag đã đến nơi target chưa (để tính timer 2p sau khi đến nơi)
+    TargetReached   = false,
 }
 
 -- ==================== HELPERS ====================
@@ -208,14 +210,14 @@ local function StartSkillLoop(wType)
     if not wCFG or not wCFG.Enable then return end
     for keyName, skillCFG in pairs(wCFG.Skills or {}) do
         if skillCFG.Enable then
-            local delay   = math.max(wCFG.Delay or FastDelay, 0.05)
+            local delay   = 0  -- 0s spam tối đa
             local hold    = skillCFG.HoldTime or 0
             local keyEnum = Enum.KeyCode[keyName]
             if keyEnum then
                 SkillThreads[keyName] = task.spawn(function()
                     while S.AttackEnabled and S.Running do
                         PressKey(keyEnum, hold)
-                        task.wait(delay)
+                        if delay > 0 then task.wait(delay) else task.wait() end
                     end
                 end)
             end
@@ -364,6 +366,11 @@ RunService.Heartbeat:Connect(function()
         SetBG(CFrame.lookAt(myPos, myPos+dir))
         ClearMover("__BP__")
     else
+        -- Đã đến nơi -> bắt đầu tính timer 2p từ lúc này
+        if not S.TargetReached then
+            S.TargetReached = true
+            S.TargetTimer = tick()
+        end
         SetBV(Vector3.new(0,0,0))
         SetBG(CFrame.lookAt(myPos, tHRP.Position))
         SetBP(Vector3.new(myPos.X, tPos.Y, myPos.Z))
@@ -420,21 +427,30 @@ local function SpamHopServer()
             end)
 
             if ok and result and result.data then
-                -- Sắp xếp theo số người nhiều nhất
+                -- Lọc server có 9-12 người
                 local servers = {}
                 for _, sv in ipairs(result.data) do
                     if sv.id ~= S.JobId
                         and not S.VisitedServers[sv.id]
-                        and sv.playing and sv.playing > 0 then
+                        and sv.playing and sv.playing >= 9 and sv.playing <= 12 then
                         table.insert(servers, sv)
                     end
                 end
 
-                -- Sắp xếp nhiều người trước
-                table.sort(servers, function(a,b) return (a.playing or 0) > (b.playing or 0) end)
+                -- Nếu không có server 9-12 người thì lấy server bất kỳ chưa visit
+                if #servers == 0 then
+                    for _, sv in ipairs(result.data) do
+                        if sv.id ~= S.JobId
+                            and not S.VisitedServers[sv.id]
+                            and sv.playing and sv.playing > 0 then
+                            table.insert(servers, sv)
+                        end
+                    end
+                end
 
                 if #servers > 0 then
-                    local chosen = servers[1]  -- server nhiều người nhất chưa visit
+                    -- Chọn ngẫu nhiên trong danh sách
+                    local chosen = servers[math.random(1, #servers)]
                     S.VisitedServers[chosen.id] = true
                     local hopOk = pcall(function()
                         TS:TeleportToPlaceInstance(game.PlaceId, chosen.id, LP)
@@ -517,6 +533,7 @@ task.spawn(function()
             S.Target = PickNextTarget(nil)
             if S.Target then
                 S.TargetTimer = tick()
+                S.TargetReached = false
                 S.Status = "hunting"
             else
                 -- Hết target (killed all hoặc skip all) -> bay lên trời + hop
@@ -532,6 +549,7 @@ task.spawn(function()
             S.Target = PickNextTarget(nil)
             if S.Target then
                 S.TargetTimer = tick()
+                S.TargetReached = false
             else
                 S.Status = "waiting"
                 SpamHopServer()
@@ -751,7 +769,7 @@ local CenterEls = {HubTitle,Divider,TargLine,HPLine,HPBarBG,DistLine,WepLine,Kil
 
 -- === TOGGLE BUTTON: Góc trái trên ===
 local TogBtn = Instance.new("ImageButton", SG)
-TogBtn.Size=UDim2.new(0,60,0,60); TogBtn.Position=UDim2.new(0,14,0,14)
+TogBtn.Size=UDim2.new(0,64,0,64); TogBtn.Position=UDim2.new(0,14,0,80)
 TogBtn.BackgroundColor3=Color3.fromRGB(8,8,18); TogBtn.BorderSizePixel=0; TogBtn.ZIndex=30
 Instance.new("UICorner",TogBtn).CornerRadius=UDim.new(1,0)
 local ts = Instance.new("UIStroke",TogBtn); ts.Color=Color3.fromRGB(255,255,255); ts.Thickness=2.5
@@ -763,7 +781,7 @@ togAvt.Image="rbxthumb://type=AvatarHeadShot&id=16060333448&w=150&h=150"
 Instance.new("UICorner",togAvt).CornerRadius=UDim.new(1,0)
 
 local TogLbl = Instance.new("TextLabel",SG)
-TogLbl.Size=UDim2.new(0,88,0,16); TogLbl.Position=UDim2.new(0,3,0,76)
+TogLbl.Size=UDim2.new(0,88,0,16); TogLbl.Position=UDim2.new(0,3,0,146)
 TogLbl.BackgroundTransparency=1; TogLbl.Text="  Hide UI"
 TogLbl.TextColor3=Color3.fromRGB(210,210,210); TogLbl.Font=Enum.Font.Gotham
 TogLbl.TextSize=11; TogLbl.ZIndex=30
