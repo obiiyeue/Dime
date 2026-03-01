@@ -1,6 +1,6 @@
 -- ================================================================
--- BOUNTY HUNTER PRO v4 - BLOX FRUITS
--- Fix: Skip blacklist, spam hop server, avatar fullscreen
+-- BOUNTY HUNTER PRO v5 - BLOX FRUITS
+-- Smart target filter, PVP check, auto pvp/v3/v4/haki, no toggle btn
 -- ================================================================
 repeat task.wait() until game:IsLoaded() and game.Players.LocalPlayer
 
@@ -13,25 +13,26 @@ local StarterGui  = game:GetService("StarterGui")
 local RS          = game:GetService("ReplicatedStorage")
 local TS          = game:GetService("TeleportService")
 local VIM         = game:GetService("VirtualInputManager")
+local TweenSvc    = game:GetService("TweenService")
 
-local LP    = Players.LocalPlayer
-local Cam   = workspace.CurrentCamera
+local LP  = Players.LocalPlayer
+local Cam = workspace.CurrentCamera
 
 -- ==================== CONFIG ====================
 getgenv().Team = getgenv().Team or "Pirates"
 getgenv().Config = getgenv().Config or {
-    ["SafeZone"]  = {["Enable"]=true,["LowHealth"]=4500,["MaxHealth"]=6000,["Teleport Y"]=9999},
-    ["Hop Server"]= {["Enable"]=true,["Delay Hop"]=1},
-    ["Setting"]   = {["Fast Delay"]=0.45,["Url"]=""},
+    ["SafeZone"]   = {["Enable"]=true,["LowHealth"]=4500,["MaxHealth"]=6000,["Teleport Y"]=9999},
+    ["Hop Server"] = {["Enable"]=true,["Delay Hop"]=1},
+    ["Setting"]    = {["Fast Delay"]=0.45,["Url"]=""},
     ["Auto turn on v4"]=true,
     ["Items"]={
-        ["Melee"]={Enable=true,Delay=0.4,Skills={
-            Z={Enable=true,HoldTime=0.3},
-            X={Enable=true,HoldTime=0.2},
-            C={Enable=true,HoldTime=0.5},
+        ["Melee"]={Enable=true,Delay=0,Skills={
+            Z={Enable=true,HoldTime=0.1},
+            X={Enable=true,HoldTime=0.1},
+            C={Enable=true,HoldTime=0.1},
         }},
-        ["Sword"]={Enable=true,Delay=0.5,Skills={
-            Z={Enable=true,HoldTime=1.0},
+        ["Sword"]={Enable=true,Delay=0,Skills={
+            Z={Enable=true,HoldTime=0.1},
             X={Enable=true,HoldTime=0.0},
         }},
     }
@@ -45,23 +46,21 @@ local S = {
     Target          = nil,
     TargetTimer     = 0,
     InSafeZone      = false,
-    UIVisible       = true,
     KillCount       = 0,
-    VisitedServers  = {},   -- server đã hop
+    VisitedServers  = {},
     AttackEnabled   = true,
     CurrentWeapon   = "Melee",
     WeaponSwapTimer = 0,
     SkillActive     = false,
     ChaseTimeout    = 120,
     JobId           = game.JobId,
-    -- BLACKLIST: player đã skip hoặc đã kill, reset khi hop server
+    -- Blacklist: đã kill hoặc skip, không kill lại trong server này
     Blacklist       = {},
-    -- Flag đang hop để không spam nhiều goroutine
     HopBusy         = false,
-    -- Trạng thái: "hunting" | "waiting" | "hopping"
     Status          = "hunting",
-    -- Flag đã đến nơi target chưa (để tính timer 2p sau khi đến nơi)
     TargetReached   = false,
+    -- Skill chỉ spam khi đã đến gần target
+    SkillAllowed    = false,
 }
 
 -- ==================== HELPERS ====================
@@ -75,11 +74,57 @@ local function IsAlive(p)
     return h and h.Health > 0
 end
 
+-- ==================== SMART PVP CHECK ====================
+-- Kiểm tra player có bật PVP và không trong safe zone
+local function IsPVPReady(p)
+    if not p or not p.Character then return false end
+    -- Kiểm tra attribute PVP phổ biến trong Blox Fruits
+    local pvp = p:GetAttribute("PVP") or p:GetAttribute("pvp") or p:GetAttribute("IsPVP")
+    if pvp == false then return false end
+    -- Nếu không có attribute -> coi là PVP on (không thể kiểm tra)
+    -- Kiểm tra safe zone: nếu player có attribute SafeZone/InSafe
+    local inSafe = p:GetAttribute("InSafeZone") or p:GetAttribute("SafeZone") or p:GetAttribute("isSafe")
+    if inSafe == true then return false end
+    -- Kiểm tra qua leaderstats hoặc folder
+    local pvpFolder = p:FindFirstChild("PVP") or (p.Character and p.Character:FindFirstChild("PVP"))
+    if pvpFolder and pvpFolder:IsA("BoolValue") and pvpFolder.Value == false then return false end
+    -- Kiểm tra thêm: nếu character có tag safe zone
+    if p.Character then
+        local safeTag = p.Character:FindFirstChild("SafeZone") or p.Character:FindFirstChild("InSafeZone")
+        if safeTag then return false end
+    end
+    return true
+end
+
+-- ==================== SAFE ZONE POSITION CHECK ====================
+-- Vùng an toàn thường là cảng/town, kiểm tra bằng Y position thấp và tên map
+local SafeZoneNames = {"Starter","Safe","Town","Marine","Base","Kingdom","Cafe","Mansion"}
+local function IsInSafeZoneArea(p)
+    if not p or not p.Character then return false end
+    local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    -- Kiểm tra nếu đang trong vùng có tên safe
+    local pos = hrp.Position
+    for _, region in ipairs(workspace:GetDescendants()) do
+        if region:IsA("BasePart") then
+            local n = region.Name:lower()
+            for _, sz in ipairs(SafeZoneNames) do
+                if n:find(sz:lower()) then
+                    -- Check nếu player gần part đó
+                    if (region.Position - pos).Magnitude < 60 then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- ==================== MOVERS ====================
 local function ClearMover(name)
-    local hrp = GetHRP()
-    if not hrp then return end
-    local o = hrp:FindFirstChild(name)
-    if o then o:Destroy() end
+    local hrp = GetHRP(); if not hrp then return end
+    local o = hrp:FindFirstChild(name); if o then o:Destroy() end
 end
 
 local function SetBV(v)
@@ -106,7 +151,7 @@ end
 
 local function Gravity(on) workspace.Gravity = on and 196.2 or 0 end
 
--- Noclip liên tục
+-- Noclip
 local NoclipOn = true
 RunService.Stepped:Connect(function()
     if not NoclipOn then return end
@@ -133,22 +178,23 @@ local function ScanFolder(folder)
 end
 for _, n in ipairs({"Util","Common","Remotes","Assets","FX"}) do ScanFolder(RS:FindFirstChild(n)) end
 
--- ==================== TARGET LIST (với blacklist) ====================
--- Trả về tất cả player sống, không trong blacklist
+-- ==================== TARGET LIST (smart filter) ====================
 local function GetTargetList()
     local list = {}
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LP and IsAlive(p) and not S.Blacklist[p.UserId] then
+        if p ~= LP
+            and IsAlive(p)
+            and not S.Blacklist[p.UserId]
+            and IsPVPReady(p)
+        then
             table.insert(list, p)
         end
     end
     return list
 end
 
--- Lấy target tiếp theo, loại trừ 'exclude'
 local function PickNextTarget(exclude)
     local list = GetTargetList()
-    -- Lọc exclude ra
     local filtered = {}
     for _, p in ipairs(list) do
         if p ~= exclude then table.insert(filtered, p) end
@@ -199,7 +245,7 @@ local function PressKey(keyCode, hold)
         pcall(function() VIM:SendKeyEvent(true, keyCode, false, game) end)
         if hold and hold > 0 then task.wait(hold) end
         pcall(function() VIM:SendKeyEvent(false, keyCode, false, game) end)
-        task.wait(0.05)
+        task.wait(0.02)
         S.SkillActive = false
     end)
 end
@@ -210,14 +256,16 @@ local function StartSkillLoop(wType)
     if not wCFG or not wCFG.Enable then return end
     for keyName, skillCFG in pairs(wCFG.Skills or {}) do
         if skillCFG.Enable then
-            local delay   = 0  -- 0s spam tối đa
             local hold    = skillCFG.HoldTime or 0
             local keyEnum = Enum.KeyCode[keyName]
             if keyEnum then
                 SkillThreads[keyName] = task.spawn(function()
                     while S.AttackEnabled and S.Running do
-                        PressKey(keyEnum, hold)
-                        if delay > 0 then task.wait(delay) else task.wait() end
+                        -- Chỉ spam skill khi đã đến gần target
+                        if S.SkillAllowed then
+                            PressKey(keyEnum, hold)
+                        end
+                        task.wait()
                     end
                 end)
             end
@@ -231,16 +279,16 @@ task.spawn(function()
     while true do
         task.wait(FastDelay * 0.5)
         if not S.AttackEnabled or not S.Running or S.InSafeZone then continue end
+        -- Chỉ attack khi đã đến gần target
+        if not S.SkillAllowed then continue end
         local c=GetChar(); local hrp=GetHRP()
         if not c or not hrp then continue end
 
-        -- Swap weapon
         if tick() - S.WeaponSwapTimer >= SWAP_INTERVAL then
             S.WeaponSwapTimer = tick()
             task.spawn(SwapWeapon)
         end
 
-        -- Collect targets (workspace)
         local targets = {}
         for _, folder in ipairs({workspace:FindFirstChild("Enemies"), workspace:FindFirstChild("Characters")}) do
             if folder then
@@ -261,7 +309,6 @@ task.spawn(function()
             end
         end
 
-        -- Priority: S.Target
         if IsAlive(S.Target) then
             local tHRP  = S.Target.Character:FindFirstChild("HumanoidRootPart")
             local tHead = S.Target.Character:FindFirstChild("Head")
@@ -280,7 +327,6 @@ task.spawn(function()
             task.spawn(function() StartSkillLoop(wType) end)
         end
 
-        -- Fire remotes
         pcall(function()
             local net = require(RS.Modules.Net)
             net:RemoteEvent("RegisterHit", true)
@@ -316,18 +362,15 @@ RunService.Heartbeat:Connect(function()
     local hrp = GetHRP(); local hum = GetHum()
     if not hrp or not hum then return end
 
-    -- Đang chờ hop: bay lên trời và hover
     if S.Status == "waiting" or S.Status == "hopping" then
         hum.PlatformStand = true
         Gravity(false)
         local safeY = CFG["SafeZone"]["Teleport Y"] or 9999
         local myPos = hrp.Position
         if myPos.Y < safeY - 50 then
-            -- Bay lên
             SetBV(Vector3.new(0, FLY_SPEED, 0))
             ClearMover("__BP__")
         else
-            -- Hover
             SetBV(Vector3.new(0,0,0))
             SetBP(Vector3.new(myPos.X, safeY, myPos.Z))
         end
@@ -342,6 +385,7 @@ RunService.Heartbeat:Connect(function()
     end
 
     if not S.Target or not IsAlive(S.Target) then
+        S.SkillAllowed = false
         SetBV(Vector3.new(0,0,0)); return
     end
 
@@ -356,6 +400,8 @@ RunService.Heartbeat:Connect(function()
     Gravity(false)
 
     if dist > 8 then
+        -- Đang bay đến target: tắt skill
+        S.SkillAllowed = false
         local dir
         if math.abs(tPos.Y - myPos.Y) < 5 then
             dir = Vector3.new(tPos.X-myPos.X, 0, tPos.Z-myPos.Z).Unit
@@ -366,11 +412,12 @@ RunService.Heartbeat:Connect(function()
         SetBG(CFrame.lookAt(myPos, myPos+dir))
         ClearMover("__BP__")
     else
-        -- Đã đến nơi -> bắt đầu tính timer 2p từ lúc này
+        -- Đã đến nơi: bật skill + bắt đầu tính timer 2p
         if not S.TargetReached then
             S.TargetReached = true
-            S.TargetTimer = tick()
+            S.TargetTimer   = tick()
         end
+        S.SkillAllowed = true
         SetBV(Vector3.new(0,0,0))
         SetBG(CFrame.lookAt(myPos, tHRP.Position))
         SetBP(Vector3.new(myPos.X, tPos.Y, myPos.Z))
@@ -387,7 +434,7 @@ task.spawn(function()
         local low  = CFG["SafeZone"]["LowHealth"]
         local full = CFG["SafeZone"]["MaxHealth"]
         if hum.Health > 0 and hum.Health <= low and not S.InSafeZone then
-            S.InSafeZone = true; S.AttackEnabled = false
+            S.InSafeZone = true; S.AttackEnabled = false; S.SkillAllowed = false
             StopSkills(); ClearFly(); Gravity(false)
         elseif S.InSafeZone and hum.Health >= full then
             S.InSafeZone = false; S.AttackEnabled = true
@@ -409,13 +456,13 @@ local function Webhook(name, bounty)
     end)
 end
 
--- ==================== SERVER HOP (SPAM) ====================
--- Gọi liên tục cho đến khi teleport thành công
+-- ==================== SERVER HOP (8-10 người) ====================
 local function SpamHopServer()
     if S.HopBusy then return end
     S.HopBusy  = true
     S.Status   = "hopping"
     StopSkills()
+    S.SkillAllowed = false
 
     task.spawn(function()
         while S.Running do
@@ -427,40 +474,30 @@ local function SpamHopServer()
             end)
 
             if ok and result and result.data then
-                -- Lọc server có 9-12 người
-                local servers = {}
+                -- Ưu tiên server 8-10 người (không quá đầy, không quá vắng)
+                local preferred = {}
+                local fallback  = {}
                 for _, sv in ipairs(result.data) do
-                    if sv.id ~= S.JobId
-                        and not S.VisitedServers[sv.id]
-                        and sv.playing and sv.playing >= 9 and sv.playing <= 12 then
-                        table.insert(servers, sv)
-                    end
-                end
-
-                -- Nếu không có server 9-12 người thì lấy server bất kỳ chưa visit
-                if #servers == 0 then
-                    for _, sv in ipairs(result.data) do
-                        if sv.id ~= S.JobId
-                            and not S.VisitedServers[sv.id]
-                            and sv.playing and sv.playing > 0 then
-                            table.insert(servers, sv)
+                    if sv.id ~= S.JobId and not S.VisitedServers[sv.id] and sv.playing then
+                        if sv.playing >= 8 and sv.playing <= 10 then
+                            table.insert(preferred, sv)
+                        elseif sv.playing > 0 and sv.playing < 8 then
+                            table.insert(fallback, sv)
                         end
+                        -- Bỏ qua server full (maxPlayers) hoặc trên 10 người
                     end
                 end
 
-                if #servers > 0 then
-                    -- Chọn ngẫu nhiên trong danh sách
-                    local chosen = servers[math.random(1, #servers)]
+                local pool = #preferred > 0 and preferred or fallback
+                if #pool > 0 then
+                    local chosen = pool[math.random(1, #pool)]
                     S.VisitedServers[chosen.id] = true
                     local hopOk = pcall(function()
                         TS:TeleportToPlaceInstance(game.PlaceId, chosen.id, LP)
                     end)
-                    if hopOk then
-                        task.wait(10)  -- đợi teleport xảy ra
-                    end
+                    if hopOk then task.wait(10) end
                 else
-                    -- Đã visit hết -> reset
-                    S.VisitedServers = {}
+                    S.VisitedServers = {} -- reset để thử lại
                 end
             end
 
@@ -469,24 +506,87 @@ local function SpamHopServer()
     end)
 end
 
--- ==================== AUTO V3/V4 ====================
+-- ==================== AUTO V3 / V4 / HAKI AURA ====================
 task.spawn(function()
     while task.wait(2) do
         if not S.Running then break end
         pcall(function()
             local rem = RS:FindFirstChild("Remotes")
+            if not rem then return end
+
+            -- V4
             if CFG["Auto turn on v4"] then
-                local v4 = rem and rem:FindFirstChild("ActivateV4")
+                local v4 = rem:FindFirstChild("ActivateV4")
                 if v4 then v4:FireServer() end
             end
-            local v3 = rem and rem:FindFirstChild("ActivateV3")
+            -- V3
+            local v3 = rem:FindFirstChild("ActivateV3")
             if v3 then v3:FireServer() end
+
+            -- Aura Haki (Buso/Ken) - thử nhiều tên remote phổ biến
+            for _, rName in ipairs({
+                "EquipHaki","AuraHaki","ActivateAura","BusoHaki","KenHaki",
+                "UseHaki","HakiAura","Haki","ActivateBuso","ActivateKen",
+                "HakiOn","EnableHaki","SetHaki"
+            }) do
+                local r = rem:FindFirstChild(rName)
+                if r and r:IsA("RemoteEvent") then
+                    pcall(function() r:FireServer(true) end)
+                end
+            end
+
+            -- Thử qua Buso/Ken folders
+            for _, folder in ipairs(rem:GetChildren()) do
+                local n = folder.Name:lower()
+                if n:find("haki") or n:find("buso") or n:find("ken") or n:find("aura") then
+                    if folder:IsA("RemoteEvent") then
+                        pcall(function() folder:FireServer(true) end)
+                    end
+                end
+            end
         end)
     end
 end)
 
+-- ==================== AUTO PVP TOGGLE ====================
+local function TurnOnPVP()
+    pcall(function()
+        local rem = RS:FindFirstChild("Remotes")
+        if not rem then return end
+        for _, rName in ipairs({
+            "PVP","TogglePVP","EnablePVP","SetPVP","PvpToggle",
+            "PVPMode","ActivatePVP","pvp","Pvp"
+        }) do
+            local r = rem:FindFirstChild(rName)
+            if r and r:IsA("RemoteEvent") then
+                pcall(function() r:FireServer(true) end)
+            end
+        end
+        -- Thử attribute trực tiếp
+        pcall(function() LP:SetAttribute("PVP", true) end)
+    end)
+end
+
+-- Bật PVP khi spawn/respawn
+LP.CharacterAdded:Connect(function()
+    task.wait(2)
+    Gravity(false); NoclipOn=true
+    TurnOnPVP()
+    task.spawn(JoinTeam)
+    S.Blacklist={}; S.Status="hunting"; S.HopBusy=false
+    S.TargetReached=false; S.SkillAllowed=false
+end)
+
+-- Bật PVP liên tục mỗi 5s (đảm bảo không bị tắt)
+task.spawn(function()
+    while task.wait(5) do
+        if not S.Running then break end
+        TurnOnPVP()
+    end
+end)
+
 -- ==================== JOIN TEAM ====================
-local function JoinTeam()
+function JoinTeam()
     pcall(function()
         local tn = getgenv().Team
         for _, t in ipairs(game.Teams:GetTeams()) do
@@ -503,17 +603,15 @@ end
 task.spawn(function()
     task.wait(3)
     JoinTeam()
+    TurnOnPVP()
 
     while S.Running do
         task.wait(0.15)
-
-        -- Đang hop/chờ thì không làm gì
         if S.Status == "hopping" then continue end
         if S.InSafeZone then continue end
 
-        -- Kiểm tra target có chết không
+        -- Target chết -> kill count, blacklist (không kill lần 2)
         if S.Target and not IsAlive(S.Target) then
-            -- Target chết -> đếm kill, add vào blacklist
             S.KillCount = S.KillCount + 1
             local bounty = 0
             pcall(function()
@@ -522,34 +620,51 @@ task.spawn(function()
                         and S.Target.leaderstats.Bounty.Value) or 0
             end)
             Webhook(S.Target.Name, bounty)
-            -- Blacklist người vừa kill (đã kill rồi, không kill lại trong server này)
-            S.Blacklist[S.Target.UserId] = true
+            S.Blacklist[S.Target.UserId] = true  -- không kill lần 2
             S.Target = nil
+            S.SkillAllowed = false
             StopSkills(); SkillThreads = {}
         end
 
-        -- Chưa có target -> tìm mới
+        -- Tìm target mới
         if not S.Target then
             S.Target = PickNextTarget(nil)
             if S.Target then
-                S.TargetTimer = tick()
+                S.TargetTimer   = tick()
                 S.TargetReached = false
+                S.SkillAllowed  = false
                 S.Status = "hunting"
             else
-                -- Hết target (killed all hoặc skip all) -> bay lên trời + hop
                 S.Status = "waiting"
                 SpamHopServer()
                 continue
             end
         end
 
-        -- Timeout 2 phút -> blacklist target hiện tại, chuyển người khác
-        if S.Target and (tick() - S.TargetTimer) >= S.ChaseTimeout then
+        -- Target hiện tại đột nhiên tắt PVP hoặc vào safe zone -> bỏ qua, tìm người khác
+        if S.Target and not IsPVPReady(S.Target) then
+            -- skip tạm thời (không blacklist vĩnh viễn vì có thể họ bật lại)
+            S.Target = PickNextTarget(S.Target)
+            if S.Target then
+                S.TargetTimer   = tick()
+                S.TargetReached = false
+                S.SkillAllowed  = false
+            else
+                S.Status = "waiting"
+                SpamHopServer()
+            end
+            StopSkills(); SkillThreads = {}
+            continue
+        end
+
+        -- Timeout 2 phút (tính từ lúc đến nơi)
+        if S.Target and S.TargetReached and (tick() - S.TargetTimer) >= S.ChaseTimeout then
             S.Blacklist[S.Target.UserId] = true
             S.Target = PickNextTarget(nil)
             if S.Target then
-                S.TargetTimer = tick()
+                S.TargetTimer   = tick()
                 S.TargetReached = false
+                S.SkillAllowed  = false
             else
                 S.Status = "waiting"
                 SpamHopServer()
@@ -601,9 +716,7 @@ RunService.RenderStepped:Connect(function()
                         local d = (Vector2.new(sp.X,sp.Y)-mp).Magnitude
                         local hum = p.Character:FindFirstChild("Humanoid")
                         local sc = d
-                        if hum and hum.MaxHealth>0 then
-                            sc = sc*(hum.Health/hum.MaxHealth+0.5)
-                        end
+                        if hum and hum.MaxHealth>0 then sc = sc*(hum.Health/hum.MaxHealth+0.5) end
                         if d <= getgenv().AimSettings.FOVSize and sc < bestScore then
                             bestScore=sc; best=p
                         end
@@ -651,7 +764,7 @@ local ESPs = {}
 local function MakeESP(p)
     if ESPs[p] then return end
     local bg = Instance.new("BillboardGui")
-    bg.Size=UDim2.new(0,160,0,45); bg.StudsOffset=Vector3.new(0,3.5,0); bg.AlwaysOnTop=true
+    bg.Size=UDim2.new(0,180,0,52); bg.StudsOffset=Vector3.new(0,3.5,0); bg.AlwaysOnTop=true
     local nL = Instance.new("TextLabel",bg)
     nL.Size=UDim2.new(1,0,0.55,0); nL.BackgroundTransparency=1
     nL.TextStrokeTransparency=0; nL.Font=Enum.Font.GothamBold; nL.TextScaled=true
@@ -667,12 +780,14 @@ local function MakeESP(p)
             local myHRP = GetHRP()
             if myHRP then
                 local d = math.floor((char.HumanoidRootPart.Position-myHRP.Position).Magnitude)
-                dL.Text = d.." studs"
-                local isT = S.Target==p
-                local isSkip = S.Blacklist[p.UserId]
+                local isPVP = IsPVPReady(p)
+                local isT   = S.Target==p
+                local isSkip= S.Blacklist[p.UserId]
+                dL.Text = d.." studs "..(isPVP and "⚔️" or "🛡")
                 nL.Text = p.Name..(isT and " 🎯" or isSkip and " ✗" or "")
                 nL.TextColor3 = isT and Color3.fromRGB(255,60,60)
                     or isSkip and Color3.fromRGB(120,120,120)
+                    or not isPVP and Color3.fromRGB(100,100,255)
                     or Color3.fromRGB(255,220,50)
             end
         end
@@ -692,16 +807,20 @@ local SG = Instance.new("ScreenGui", LP.PlayerGui)
 SG.Name="BountyUI"; SG.ResetOnSpawn=false
 SG.ZIndexBehavior=Enum.ZIndexBehavior.Sibling; SG.IgnoreGuiInset=true
 
--- === FULLSCREEN AVATAR ===
+-- === FULLSCREEN AVATAR (AvatarBust rõ hơn HeadShot, dùng type=Avatar để full body) ===
 local FullBG = Instance.new("ImageLabel", SG)
-FullBG.Size=UDim2.new(1,0,1,0); FullBG.Position=UDim2.new(0,0,0,0)
-FullBG.BackgroundTransparency=1
-FullBG.Image="rbxthumb://type=AvatarHeadShot&id=16060333448&w=420&h=420"
-FullBG.ImageTransparency=0.5; FullBG.ScaleType=Enum.ScaleType.Stretch; FullBG.ZIndex=1
+FullBG.Size    = UDim2.new(1,0,1,0)
+FullBG.Position= UDim2.new(0,0,0,0)
+FullBG.BackgroundTransparency = 1
+FullBG.Image   = "rbxthumb://type=AvatarBust&id=16060333448&w=420&h=420"
+FullBG.ImageTransparency = 0.5
+FullBG.ScaleType = Enum.ScaleType.Stretch
+FullBG.ZIndex  = 1
 
+-- Overlay mờ tối phía sau HUD
 local Overlay = Instance.new("Frame", SG)
 Overlay.Size=UDim2.new(1,0,1,0); Overlay.BackgroundColor3=Color3.fromRGB(0,0,5)
-Overlay.BackgroundTransparency=0.55; Overlay.BorderSizePixel=0; Overlay.ZIndex=2
+Overlay.BackgroundTransparency=0.72; Overlay.BorderSizePixel=0; Overlay.ZIndex=2
 
 -- === CENTER HUD ===
 local function MakeLabel(parent, size, pos, text, color, font, zindex)
@@ -714,7 +833,7 @@ end
 
 local HubTitle = MakeLabel(SG,
     UDim2.new(0,640,0,88), UDim2.new(0.5,-320,0.5,-175),
-    "Switch Hub ( Bounty )", Color3.fromRGB(100,215,255),
+    "🏴‍☠️ Bounty Hunter Pro v5", Color3.fromRGB(100,215,255),
     Enum.Font.GothamBlack, 10)
 
 local Divider = Instance.new("Frame", SG)
@@ -724,15 +843,12 @@ Divider.BorderSizePixel=0; Divider.ZIndex=10
 
 local TargLine = MakeLabel(SG,
     UDim2.new(0,520,0,34), UDim2.new(0.5,-260,0.5,-65),
-    "🎯 Target: Searching...", Color3.fromRGB(255,255,255),
-    Enum.Font.GothamBold, 10)
+    "🎯 Target: Searching...", Color3.fromRGB(255,255,255), Enum.Font.GothamBold, 10)
 
 local HPLine = MakeLabel(SG,
     UDim2.new(0,520,0,28), UDim2.new(0.5,-260,0.5,-26),
-    "❤️ HP: --", Color3.fromRGB(100,255,120),
-    Enum.Font.Gotham, 10)
+    "❤️ HP: --", Color3.fromRGB(100,255,120), Enum.Font.Gotham, 10)
 
--- HP bar
 local HPBarBG = Instance.new("Frame", SG)
 HPBarBG.Size=UDim2.new(0,400,0,10); HPBarBG.Position=UDim2.new(0.5,-200,0.5,7)
 HPBarBG.BackgroundColor3=Color3.fromRGB(40,40,40); HPBarBG.BackgroundTransparency=0.2
@@ -754,46 +870,17 @@ local WepLine = MakeLabel(SG,
 
 local KillLine = MakeLabel(SG,
     UDim2.new(0,520,0,24), UDim2.new(0.5,-260,0.5,83),
-    "💀 Kills: 0  |  ⏱ 120s", Color3.fromRGB(255,110,110), Enum.Font.GothamBold, 10)
+    "💀 Kills: 0  |  ⏱ --s", Color3.fromRGB(255,110,110), Enum.Font.GothamBold, 10)
 
 local StatusLine = MakeLabel(SG,
     UDim2.new(0,520,0,28), UDim2.new(0.5,-260,0.5,113),
     "", Color3.fromRGB(255,80,80), Enum.Font.GothamBold, 10)
 
--- Blacklist count
 local BlacklistLine = MakeLabel(SG,
     UDim2.new(0,520,0,22), UDim2.new(0.5,-260,0.5,146),
     "", Color3.fromRGB(160,160,160), Enum.Font.Gotham, 10)
 
-local CenterEls = {HubTitle,Divider,TargLine,HPLine,HPBarBG,DistLine,WepLine,KillLine,StatusLine,BlacklistLine}
-
--- === TOGGLE BUTTON: Góc trái trên ===
-local TogBtn = Instance.new("ImageButton", SG)
-TogBtn.Size=UDim2.new(0,64,0,64); TogBtn.Position=UDim2.new(0,14,0,80)
-TogBtn.BackgroundColor3=Color3.fromRGB(8,8,18); TogBtn.BorderSizePixel=0; TogBtn.ZIndex=30
-Instance.new("UICorner",TogBtn).CornerRadius=UDim.new(1,0)
-local ts = Instance.new("UIStroke",TogBtn); ts.Color=Color3.fromRGB(255,255,255); ts.Thickness=2.5
-
-local togAvt = Instance.new("ImageLabel",TogBtn)
-togAvt.Size=UDim2.new(1,-6,1,-6); togAvt.Position=UDim2.new(0,3,0,3)
-togAvt.BackgroundTransparency=1
-togAvt.Image="rbxthumb://type=AvatarHeadShot&id=16060333448&w=150&h=150"
-Instance.new("UICorner",togAvt).CornerRadius=UDim.new(1,0)
-
-local TogLbl = Instance.new("TextLabel",SG)
-TogLbl.Size=UDim2.new(0,88,0,16); TogLbl.Position=UDim2.new(0,3,0,146)
-TogLbl.BackgroundTransparency=1; TogLbl.Text="  Hide UI"
-TogLbl.TextColor3=Color3.fromRGB(210,210,210); TogLbl.Font=Enum.Font.Gotham
-TogLbl.TextSize=11; TogLbl.ZIndex=30
-
-TogBtn.MouseButton1Click:Connect(function()
-    S.UIVisible = not S.UIVisible
-    for _, e in ipairs(CenterEls) do e.Visible=S.UIVisible end
-    FullBG.Visible=S.UIVisible; Overlay.Visible=S.UIVisible
-    TogLbl.Text = S.UIVisible and "  Hide UI" or "  Show UI"
-end)
-
--- === SKIP BUTTON (Góc phải trên) ===
+-- === SKIP BUTTON ===
 local SkipBtn = Instance.new("TextButton", SG)
 SkipBtn.Size=UDim2.new(0,125,0,38); SkipBtn.Position=UDim2.new(1,-139,0,14)
 SkipBtn.BackgroundColor3=Color3.fromRGB(255,255,255); SkipBtn.TextColor3=Color3.fromRGB(0,0,0)
@@ -803,26 +890,19 @@ Instance.new("UICorner",SkipBtn).CornerRadius=UDim.new(0,8)
 
 SkipBtn.MouseButton1Click:Connect(function()
     if S.Target then
-        -- Blacklist player hiện tại
         S.Blacklist[S.Target.UserId] = true
-        S.Target = nil
+        S.Target = nil; S.SkillAllowed = false
         StopSkills(); SkillThreads={}
-
-        -- Tìm target tiếp theo (đã loại blacklist)
         local next = PickNextTarget(nil)
         if next then
-            S.Target = next
-            S.TargetTimer = tick()
-            S.Status = "hunting"
+            S.Target=next; S.TargetTimer=tick(); S.TargetReached=false; S.Status="hunting"
         else
-            -- Hết tất cả -> bay lên trời + hop server
-            S.Status = "waiting"
-            SpamHopServer()
+            S.Status="waiting"; SpamHopServer()
         end
     end
 end)
 
--- === RESET BLACKLIST BUTTON (nhỏ dưới skip) ===
+-- === RESET BLACKLIST BUTTON ===
 local ResetBtn = Instance.new("TextButton", SG)
 ResetBtn.Size=UDim2.new(0,125,0,26); ResetBtn.Position=UDim2.new(1,-139,0,56)
 ResetBtn.BackgroundColor3=Color3.fromRGB(200,60,60); ResetBtn.TextColor3=Color3.fromRGB(255,255,255)
@@ -833,33 +913,39 @@ Instance.new("UICorner",ResetBtn).CornerRadius=UDim.new(0,6)
 ResetBtn.MouseButton1Click:Connect(function()
     S.Blacklist = {}
     if S.Status == "waiting" or S.Status == "hopping" then
-        S.HopBusy = false; S.Status = "hunting"
+        S.HopBusy=false; S.Status="hunting"
         local next = PickNextTarget(nil)
-        if next then S.Target=next; S.TargetTimer=tick() end
+        if next then S.Target=next; S.TargetTimer=tick(); S.TargetReached=false end
     end
 end)
 
 -- ==================== UI UPDATE ====================
 RunService.RenderStepped:Connect(function()
-    local timeLeft = S.Target and math.max(0, S.ChaseTimeout-(tick()-S.TargetTimer)) or 0
-    KillLine.Text = string.format("💀 Kills: %d  |  ⏱ %ds", S.KillCount, math.floor(timeLeft))
+    local timeLeft = (S.Target and S.TargetReached)
+        and math.max(0, S.ChaseTimeout-(tick()-S.TargetTimer)) or 0
+    local timerTxt = S.TargetReached and (math.floor(timeLeft).."s") or "flying..."
+    KillLine.Text = string.format("💀 Kills: %d  |  ⏱ %s", S.KillCount, timerTxt)
     WepLine.Text  = "⚔️ Weapon: "..(S.CurrentWeapon or "Melee")..(S.SkillActive and "  ✦" or "")
 
-    -- Đếm blacklist
     local bCount = 0
     for _ in pairs(S.Blacklist) do bCount=bCount+1 end
-    BlacklistLine.Text = bCount>0 and ("🚫 Skipped: "..bCount.." player(s)") or ""
+    BlacklistLine.Text = bCount>0 and ("🚫 Killed/Skipped: "..bCount.." player(s)") or ""
 
-    -- Status line
     if S.Status=="hopping" then
-        StatusLine.Text="🔄 Spam hopping server..."
+        StatusLine.Text="🔄 Hopping server (8-10 players)..."
         StatusLine.TextColor3=Color3.fromRGB(255,200,50)
     elseif S.Status=="waiting" then
-        StatusLine.Text="⏳ Chờ hop server..."
+        StatusLine.Text="⏳ Waiting to hop..."
         StatusLine.TextColor3=Color3.fromRGB(255,150,50)
     elseif S.InSafeZone then
         StatusLine.Text="🛡 SAFE ZONE — Recovering HP..."
         StatusLine.TextColor3=Color3.fromRGB(255,80,80)
+    elseif S.Target and not S.TargetReached then
+        StatusLine.Text="✈️ Flying to target..."
+        StatusLine.TextColor3=Color3.fromRGB(100,200,255)
+    elseif S.SkillAllowed then
+        StatusLine.Text="⚡ Attacking!"
+        StatusLine.TextColor3=Color3.fromRGB(50,255,120)
     else
         StatusLine.Text=""
     end
@@ -883,28 +969,23 @@ RunService.RenderStepped:Connect(function()
             local d = math.floor((tHRP.Position-myHRP.Position).Magnitude)
             DistLine.Text = "📏 Distance: "..d.." studs"
         end
-        HubTitle.Text = string.format("Switch Hub ( Bounty ) | %ds", math.floor(timeLeft))
+        HubTitle.Text = string.format("🏴‍☠️ Bounty Hunter Pro v5 | %s", timerTxt)
     else
         TargLine.Text="🎯 Target: Searching..."; HPLine.Text="❤️ HP: --"
         DistLine.Text="📏 Distance: --"; HPBar.Size=UDim2.new(0,0,1,0)
-        HubTitle.Text="Switch Hub ( Bounty )"
+        HubTitle.Text="🏴‍☠️ Bounty Hunter Pro v5"
     end
 end)
 
 -- ==================== RESPAWN ====================
-LP.CharacterAdded:Connect(function()
-    task.wait(1.5)
-    Gravity(false); NoclipOn=true; JoinTeam()
-    -- Reset blacklist khi respawn (server mới)
-    S.Blacklist={}; S.Status="hunting"; S.HopBusy=false
-end)
-if LP.Character then Gravity(false); NoclipOn=true end
+if LP.Character then Gravity(false); NoclipOn=true; TurnOnPVP() end
 
 -- ==================== DONE ====================
-print("[BountyHunter Pro v4] Loaded | Team: "..(getgenv().Team or "Pirates"))
+print("[BountyHunter Pro v5] Loaded | Team: "..(getgenv().Team or "Pirates"))
 pcall(function()
     StarterGui:SetCore("SendNotification",{
-        Title="🏴‍☠️ Bounty Hunter Pro v4",
-        Text="Loaded! Team: "..(getgenv().Team or "Pirates"), Duration=5
+        Title="🏴‍☠️ Bounty Hunter Pro v5",
+        Text="Loaded! Smart PVP filter ON | Team: "..(getgenv().Team or "Pirates"),
+        Duration=5
     })
 end)
